@@ -1,0 +1,1066 @@
+---
+title: "Evolving Memory Agent Setup"
+subtitle: "OpenSpace · Ollama · WezTerm · OpenRouter · Gemini · Perplexity · Open WebUI · MCP · Remote Access"
+author: "Ilya Kashnitsky"
+date: last-modified
+date-format: "YYYY-MM-DD"
+format:
+  html:
+    theme: minty
+    toc: true
+    toc-depth: 3
+    toc-title: "Contents"
+    toc-location: left
+    number-sections: true
+    smooth-scroll: true
+    code-fold: false
+    code-copy: true
+    code-overflow: scroll
+    highlight-style: github
+    embed-resources: true
+    include-in-header:
+      text: |
+        <style>
+        body { font-size: 0.95rem; }
+        h1.title { font-size: 1.8rem; }
+        .callout { margin-block: 1.2rem; }
+        code { font-size: 0.85em; }
+        pre.sourceCode { font-size: 0.85em; }
+        </style>
+execute:
+  echo: true
+  eval: false
+---
+
+# Overview
+
+This guide installs and wires together a self-evolving memory agent stack with full MCP support and persistent remote access from any device. Follow each section in order.
+
+**Stack summary:**
+
+| Component | Role |
+|---|---|
+| **WezTerm** | Terminal emulator used throughout |
+| **pixi** | Python environment manager |
+| **Ollama** | Local LLM inference (offline models) |
+| **Open WebUI** | Chat UI — Ollama + external APIs + MCP tools |
+| **mcpo** | MCP-to-OpenAPI proxy for stdio-based MCP servers |
+| **OpenRouter** | Unified API gateway for cloud models |
+| **Gemini API** | Primary reasoning engine for OpenSpace |
+| **Perplexity API** | Live-search tool inside the agent |
+| **OpenSpace** | Self-evolving skill memory agent |
+| **systemd** | Keeps all services running permanently (Linux) |
+| **Tailscale** | Secure remote access from phone or laptop |
+
+::: {.callout-note}
+**MCP in Open WebUI:** Native HTTP/SSE support since **v0.6.31**. For the more common stdio-based MCP servers (filesystem, memory, brave-search, etc.) the `mcpo` proxy converts them to OpenAPI endpoints. Section 6 covers both paths.
+:::
+
+---
+
+# WezTerm
+
+WezTerm is a GPU-accelerated cross-platform terminal emulator used for all commands in this guide.
+
+## Install
+
+::: {.panel-tabset}
+
+### Windows
+
+```powershell
+winget install wez.wezterm
+```
+
+Or download from [wezfurlong.org/wezterm/installation](https://wezfurlong.org/wezterm/installation.html).
+
+### macOS
+
+```bash
+brew install --cask wezterm
+```
+
+### Linux (Debian/Ubuntu/Zorin)
+
+```bash
+curl -fsSL https://apt.fury.io/wez/gpg.key \
+  | sudo gpg --dearmor -o /usr/share/keyrings/wezterm-fury.gpg
+echo 'deb [signed-by=/usr/share/keyrings/wezterm-fury.gpg] https://apt.fury.io/wez/ * *' \
+  | sudo tee /etc/apt/sources.list.d/wezterm.list
+sudo apt update && sudo apt install wezterm
+```
+
+:::
+
+## Verify
+
+```bash
+wezterm --version
+```
+
+---
+
+# pixi
+
+pixi manages Python environments without conda or venv friction. Install once globally.
+
+## Install
+
+::: {.panel-tabset}
+
+### Windows
+
+```powershell
+winget install prefix-dev.pixi
+```
+
+### macOS
+
+```bash
+brew install pixi
+```
+
+### Linux
+
+```bash
+curl -fsSL https://pixi.sh/install.sh | sh
+# Restart your shell or run:
+source ~/.bashrc
+```
+
+:::
+
+## Verify
+
+```bash
+pixi --version
+```
+
+---
+
+# Ollama
+
+Ollama runs open-weight LLMs locally. Both Open WebUI and OpenSpace connect to it.
+
+## Install
+
+::: {.panel-tabset}
+
+### Windows
+
+Download from [ollama.com/download](https://ollama.com/download). The installer registers Ollama as a background service automatically.
+
+### macOS
+
+```bash
+brew install ollama
+# Start as a background service:
+brew services start ollama
+```
+
+### Linux
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+# The script registers a systemd service — Ollama starts on boot automatically.
+```
+
+:::
+
+## Verify
+
+```bash
+ollama --version
+ollama list          # empty initially
+```
+
+## Pull a baseline model
+
+```bash
+ollama pull gemma3:12b
+```
+
+::: {.callout-tip}
+On lower VRAM (under 8 GB), use `gemma3:4b` or `qwen2.5:7b` instead.
+:::
+
+## Test
+
+```bash
+ollama run gemma3:12b "What is a skill-based memory agent? Two sentences."
+```
+
+---
+
+# Open WebUI
+
+Open WebUI is a chat interface connecting Ollama locally, any OpenAI-compatible API externally, and MCP tool servers natively since v0.6.31.
+
+## Install
+
+::: {.panel-tabset}
+
+### Windows / macOS
+
+```bash
+mkdir ~/openwebui && cd ~/openwebui
+pixi init
+pixi add python==3.11 pip
+pixi run pip install open-webui
+```
+
+### Linux
+
+```bash
+mkdir ~/openwebui && cd ~/openwebui
+pixi init
+pixi add python==3.11 pip
+pixi run pip install open-webui
+# Note the exact binary path for the systemd unit in Section 12:
+pixi run which open-webui
+```
+
+:::
+
+## Start (manual / development)
+
+::: {.panel-tabset}
+
+### Windows / macOS
+
+```bash
+cd ~/openwebui
+MCP_ENABLE=true pixi run open-webui serve
+```
+
+On Windows (PowerShell), set the variable separately:
+
+```powershell
+$env:MCP_ENABLE = "true"
+cd ~/openwebui
+pixi run open-webui serve
+```
+
+### Linux
+
+```bash
+cd ~/openwebui
+MCP_ENABLE=true pixi run open-webui serve
+```
+
+For permanent background operation, use the systemd unit in Section 12 instead of running this manually.
+
+:::
+
+Open `http://localhost:8080`. On first launch it auto-detects Ollama at `http://localhost:11434`.
+
+::: {.callout-note}
+`MCP_ENABLE=true` is required to make the MCP connections panel visible. First start downloads a small embedding model — allow 1–2 minutes.
+:::
+
+## Connect external APIs
+
+After completing the API key sections below, go to **Settings → Connections** and add:
+
+| Provider | Base URL | Key |
+|---|---|---|
+| OpenRouter | `https://openrouter.ai/api/v1` | `sk-or-v1-...` |
+| Gemini | `https://generativelanguage.googleapis.com/v1beta/openai/` | `AIza-...` |
+| Perplexity | `https://api.perplexity.ai` | `pplx-...` |
+
+---
+
+# MCP Tools
+
+MCP (Model Context Protocol) lets the chat agent call external tools — filesystem access, web search, memory stores, databases, and anything else an MCP server exposes.
+
+| Transport | Examples | Setup needed |
+|---|---|---|
+| **HTTP / SSE** | Remote services, n8n, hosted MCP | Register URL directly in UI |
+| **stdio** (most common) | filesystem, memory, brave-search | `mcpo` proxy → then register in UI |
+
+## Path A — Native HTTP MCP
+
+For MCP servers that already speak HTTP (no proxy needed):
+
+1. Go to **Admin Settings → External Tools → + Add Server**.
+2. Set **Type** to **MCP (Streamable HTTP)**.
+3. Paste the server URL and any auth token.
+4. **Save** — tools appear in the chat tool picker immediately.
+
+## Path B — stdio MCP via mcpo
+
+### Install mcpo
+
+::: {.panel-tabset}
+
+### Windows / macOS / Linux
+
+```bash
+cd ~/openwebui
+pixi run pip install mcpo
+# Note the binary path for systemd (Linux):
+pixi run which mcpo
+```
+
+:::
+
+### Create `mcp-config.json`
+
+Create `~/openwebui/mcp-config.json`:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/home/youruser/Documents"
+      ]
+    },
+    "memory": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ]
+    },
+    "brave-search": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-brave-search"
+      ],
+      "env": {
+        "BRAVE_API_KEY": "your-brave-api-key-here"
+      }
+    }
+  }
+}
+```
+
+::: {.panel-tabset}
+
+#### Windows path
+
+```json
+"args": ["-y", "@modelcontextprotocol/server-filesystem", "C:\\Users\\yourname\\Documents"]
+```
+
+#### macOS path
+
+```json
+"args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/yourname/Documents"]
+```
+
+#### Linux path
+
+```json
+"args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/youruser/Documents"]
+```
+
+:::
+
+::: {.callout-note}
+`npx` runs servers on demand — no global npm installs required. Node.js must be present (`node --version`).
+
+**Install Node.js if missing:**
+
+```bash
+# Linux (via nvm — recommended over apt)
+curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+source ~/.bashrc
+nvm install --lts
+
+# macOS
+brew install node
+
+# Windows
+winget install OpenJS.NodeJS.LTS
+```
+:::
+
+### Start mcpo (manual)
+
+```bash
+cd ~/openwebui
+pixi run mcpo --host 0.0.0.0 --port 8000 \
+  --config ./mcp-config.json \
+  --hot-reload
+```
+
+On Linux, use the systemd unit in Section 12 instead.
+
+### Verify
+
+```bash
+curl http://localhost:8000/docs
+```
+
+Returns the OpenAPI schema for all registered servers. If it loads, the proxy is healthy.
+
+### Register in Open WebUI
+
+**Admin Settings → External Tools → + Add Server → Type: OpenAPI**
+
+One entry per server:
+
+```
+http://localhost:8000/filesystem
+http://localhost:8000/memory
+http://localhost:8000/brave-search
+```
+
+---
+
+# OpenRouter
+
+Unified access to 200+ cloud models under a single endpoint and billing account.
+
+## Get your API key
+
+1. Sign up at [openrouter.ai](https://openrouter.ai).
+2. Go to **Keys → Create key**. Copy `sk-or-v1-...`.
+3. Add credits under **Credits** (pay-as-you-go).
+
+## Set the environment variable
+
+::: {.panel-tabset}
+
+### Linux / macOS
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+export OPENROUTER_API_KEY="sk-or-v1-your-key-here"
+source ~/.bashrc
+```
+
+### Windows (PowerShell)
+
+```powershell
+[System.Environment]::SetEnvironmentVariable(
+  "OPENROUTER_API_KEY", "sk-or-v1-your-key-here", "User"
+)
+```
+
+:::
+
+## Test
+
+```bash
+curl https://openrouter.ai/api/v1/chat/completions \
+  -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"google/gemini-2.0-flash-001","messages":[{"role":"user","content":"ping"}]}'
+```
+
+---
+
+# Gemini API
+
+Primary reasoning engine for OpenSpace. Billed separately from your Gemini Advanced subscription.
+
+::: {.callout-important}
+**Gemini Advanced** covers the chat product only. Get an API key from AI Studio — generous free tier, paid via standard Google Cloud billing.
+:::
+
+## Get your API key
+
+1. Go to [aistudio.google.com](https://aistudio.google.com).
+2. Click **Get API key → Create API key**. Copy `AIza...`.
+
+## Set the environment variable
+
+::: {.panel-tabset}
+
+### Linux / macOS
+
+```bash
+export GEMINI_API_KEY="AIza-your-key-here"
+```
+
+### Windows (PowerShell)
+
+```powershell
+[System.Environment]::SetEnvironmentVariable(
+  "GEMINI_API_KEY", "AIza-your-key-here", "User"
+)
+```
+
+:::
+
+## Test
+
+```bash
+curl "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$GEMINI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"contents":[{"parts":[{"text":"Say hello in one word"}]}]}'
+```
+
+---
+
+# Perplexity API
+
+Adds live web-search to the agent via `sonar-pro`. Pro subscription includes $5/month in API credits, billed separately.
+
+::: {.callout-important}
+**Perplexity Pro** chat credits and API credits are independent. Enable API billing at [perplexity.ai/settings/api](https://perplexity.ai/settings/api).
+:::
+
+## Get your API key
+
+1. Go to [perplexity.ai/settings/api](https://perplexity.ai/settings/api).
+2. Click **Generate**. Copy `pplx-...`.
+
+## Set the environment variable
+
+::: {.panel-tabset}
+
+### Linux / macOS
+
+```bash
+export PERPLEXITY_API_KEY="pplx-your-key-here"
+```
+
+### Windows (PowerShell)
+
+```powershell
+[System.Environment]::SetEnvironmentVariable(
+  "PERPLEXITY_API_KEY", "pplx-your-key-here", "User"
+)
+```
+
+:::
+
+## Test
+
+```bash
+curl https://api.perplexity.ai/chat/completions \
+  -H "Authorization: Bearer $PERPLEXITY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"sonar","messages":[{"role":"user","content":"What is todays date?"}]}'
+```
+
+---
+
+# OpenSpace
+
+Self-evolving skill engine. Extracts a reusable skill after each task and reuses it on subsequent similar tasks — cutting token cost over time.
+
+**Repo:** [github.com/HKUDS/OpenSpace](https://github.com/HKUDS/OpenSpace)
+
+## How it works
+
+```
+User task
+    │
+    ▼
+Skill Retrieval ──► ~/.openspace_skills.json
+    │                  hit: reuse skill
+    │                  miss: reason from scratch
+    ▼
+Gemini 2.5 Flash          ← OPENSPACE_MODEL in .env
+    │
+    ├── needs web data? ──► web_search() ──► Perplexity sonar-pro
+    │
+    ▼
+Task result + new skill extracted and saved
+```
+
+## Create the project
+
+::: {.panel-tabset}
+
+### Windows / macOS / Linux
+
+```bash
+mkdir ~/openspace-agent && cd ~/openspace-agent
+pixi init
+pixi add python==3.11 pip
+pixi run pip install python-dotenv
+pixi run pip install "git+https://github.com/HKUDS/OpenSpace.git"
+```
+
+:::
+
+## Create `.env`
+
+```ini
+# Primary reasoning model (LiteLLM model string)
+OPENSPACE_MODEL=gemini/gemini-2.5-flash
+
+# Gemini API key — from aistudio.google.com
+GEMINI_API_KEY=AIza-your-key-here
+
+# Perplexity key — for the web_search tool
+PERPLEXITY_API_KEY=pplx-your-key-here
+```
+
+```bash
+echo ".env" >> .gitignore
+```
+
+## Create `tools.py`
+
+```python
+import os
+from openai import OpenAI
+
+_client = OpenAI(
+    api_key=os.environ["PERPLEXITY_API_KEY"],
+    base_url="https://api.perplexity.ai",
+)
+
+def web_search(query: str) -> str:
+    """Live web search via Perplexity sonar-pro. Call when current information is needed."""
+    resp = _client.chat.completions.create(
+        model="sonar-pro",
+        messages=[{"role": "user", "content": query}],
+    )
+    return resp.choices[0].message.content
+```
+
+## Verify
+
+```python
+# verify.py
+from dotenv import load_dotenv
+load_dotenv()
+
+from openspace import OpenSpace
+from tools import web_search
+
+agent = OpenSpace(tools=[web_search])
+print(agent.run("What is 2 + 2? Answer in exactly one word."))
+# Expected: "Four"
+```
+
+```bash
+pixi run python verify.py
+```
+
+---
+
+# Jumpstart Skills
+
+Seeds the skill library with 21 pre-distilled skills from your system prompt collection. Covers R coding, ggplot2, SKAT, bibliometrics, fact-checking, and 16 other domains.
+
+## Place the seed files
+
+```
+~/openspace-agent/
+├── .env
+├── .gitignore
+├── tools.py
+├── verify.py
+├── seed_skills.py          ← copy here
+└── openspace_skills.json   ← copy here
+```
+
+## Run the seeder
+
+```bash
+cd ~/openspace-agent
+pixi run python seed_skills.py
+# ✓ Added 21 new skills (21 total in library)
+```
+
+::: {.callout-tip}
+To reset and overwrite any previously learned skills:
+
+```bash
+pixi run python seed_skills.py --replace
+```
+:::
+
+## Skills installed
+
+| Domain | Skills |
+|---|---|
+| Dev / Code | Prompt engineering, R coding, ggplot2, CLI tooling, Oracle/DB |
+| FOSS | FOSS alternatives, Linux/Debian troubleshooting |
+| Research | Fact-checking, bibliometrics, demography |
+| Danish context | SKAT/tax, press weekly, daily news, writing assistant |
+| Information tasks | AI briefing, public figure profiling, OCR+translate, alt text |
+| Personal | Running coach (Garmin CSV), health/medical |
+| Lifestyle | Walking tour design |
+
+---
+
+# Persistent Services (Linux)
+
+Keep the full stack running in the background and surviving reboots. Ollama is already registered as a systemd service by its installer. Create units for Open WebUI and mcpo.
+
+::: {.callout-note}
+This section is Linux-only (systemd). On **macOS**, use `brew services` for Ollama and `launchd` plists for Open WebUI and mcpo. On **Windows**, use Task Scheduler (run on login, hidden) or NSSM.
+:::
+
+## Find your pixi binary paths
+
+Before writing the unit files, get the exact paths pixi uses:
+
+```bash
+cd ~/openwebui
+pixi run which open-webui   # e.g. /home/youruser/.pixi/envs/default/bin/open-webui
+pixi run which mcpo         # e.g. /home/youruser/.pixi/envs/default/bin/mcpo
+```
+
+## Open WebUI service
+
+Create `/etc/systemd/system/openwebui.service` (replace `youruser` throughout):
+
+```ini
+[Unit]
+Description=Open WebUI
+After=network.target ollama.service
+Wants=ollama.service
+
+[Service]
+Type=simple
+User=youruser
+WorkingDirectory=/home/youruser/openwebui
+Environment="MCP_ENABLE=true"
+Environment="GEMINI_API_KEY=AIza-your-key-here"
+Environment="OPENROUTER_API_KEY=sk-or-v1-your-key-here"
+Environment="PERPLEXITY_API_KEY=pplx-your-key-here"
+ExecStart=/home/youruser/.pixi/envs/default/bin/open-webui serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+::: {.callout-tip}
+Prefer loading secrets from a file instead of inline `Environment=` lines — more secure and easier to update:
+
+```ini
+EnvironmentFile=/home/youruser/openwebui/.env.service
+```
+
+Put `KEY=value` pairs (no `export`) in `/home/youruser/openwebui/.env.service` and `chmod 600` the file.
+:::
+
+## mcpo service
+
+Create `/etc/systemd/system/mcpo.service`:
+
+```ini
+[Unit]
+Description=mcpo MCP proxy
+After=network.target
+
+[Service]
+Type=simple
+User=youruser
+WorkingDirectory=/home/youruser/openwebui
+ExecStart=/home/youruser/.pixi/envs/default/bin/mcpo \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --config /home/youruser/openwebui/mcp-config.json \
+  --hot-reload
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Enable and start everything
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ollama openwebui mcpo
+
+# Check status
+sudo systemctl status ollama openwebui mcpo
+
+# Live logs (Ctrl+C to exit)
+journalctl -fu openwebui
+journalctl -fu mcpo
+```
+
+## Useful service commands
+
+```bash
+# Restart after config changes
+sudo systemctl restart openwebui
+sudo systemctl restart mcpo
+
+# Stop temporarily (does not disable autostart)
+sudo systemctl stop openwebui
+
+# Disable autostart permanently
+sudo systemctl disable openwebui
+```
+
+---
+
+# Remote Access
+
+Access Open WebUI from your phone, laptop, or any other device — from anywhere.
+
+## Option A — Tailscale (Recommended)
+
+Tailscale creates a private WireGuard mesh between your devices. Nothing is exposed to the internet. Works through CGNAT (common in Denmark). Free tier supports up to 100 devices.
+
+### Install on the home machine
+
+::: {.panel-tabset}
+
+#### Linux
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+# Authenticate in the browser that opens
+tailscale ip        # note this IP — e.g. 100.64.1.5
+```
+
+#### macOS
+
+```bash
+brew install tailscale
+sudo tailscale up
+tailscale ip
+```
+
+#### Windows
+
+```powershell
+winget install tailscale.tailscale
+# Open the Tailscale tray icon → Log in
+```
+
+:::
+
+### Install on every client device
+
+- **Android (Pixel):** Tailscale on Google Play
+- **iOS:** Tailscale on App Store
+- **Laptop:** same installer as above
+
+Sign in to the **same Tailscale account** on all devices.
+
+### Access Open WebUI
+
+```
+http://<tailscale-ip>:8080
+```
+
+For a stable hostname instead of an IP, open the [Tailscale admin console](https://login.tailscale.com/admin/machines), click the machine, and set a **machine name** — then use:
+
+```
+http://myhomepc:8080
+```
+
+::: {.callout-tip}
+Enable **Tailscale MagicDNS** in the admin console → DNS → Enable MagicDNS. This makes `http://myhomepc:8080` work on all your devices without touching any `/etc/hosts` file.
+:::
+
+### (Optional) Enable subnet routing
+
+To access other services on your home network (NAS, router, Raspberry Pi) through Tailscale without installing it on every device:
+
+```bash
+# On the home machine — advertise the local subnet
+sudo tailscale up --advertise-routes=192.168.1.0/24
+
+# Approve the subnet in the Tailscale admin console:
+# Machines → your machine → Edit route settings → Approve
+```
+
+## Option B — Cloudflare Tunnel
+
+If you want access from any browser without installing Tailscale on each device. Requires a domain managed by Cloudflare (free plan is fine).
+
+::: {.callout-warning}
+Cloudflare Tunnel makes Open WebUI **reachable on the public internet**. Before setting this up: go to Open WebUI **Admin Settings → Users**, disable public registration and keep only your own account. Add Cloudflare Access in front of the tunnel (free) for an additional login gate.
+:::
+
+### Install cloudflared
+
+::: {.panel-tabset}
+
+#### Linux (Debian/Ubuntu)
+
+```bash
+curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
+  | sudo tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] \
+  https://pkg.cloudflare.com/cloudflared jammy main' \
+  | sudo tee /etc/apt/sources.list.d/cloudflared.list
+sudo apt update && sudo apt install cloudflared
+```
+
+#### macOS
+
+```bash
+brew install cloudflared
+```
+
+#### Windows
+
+```powershell
+winget install Cloudflare.cloudflared
+```
+
+:::
+
+### Create and route the tunnel
+
+```bash
+cloudflared login
+cloudflared tunnel create openwebui
+cloudflared tunnel route dns openwebui chat.yourdomain.com
+```
+
+### Create `/etc/cloudflared/config.yml`
+
+```yaml
+tunnel: <your-tunnel-id>
+credentials-file: /root/.cloudflared/<your-tunnel-id>.json
+
+ingress:
+  - hostname: chat.yourdomain.com
+    service: http://localhost:8080
+  - service: http_status:404
+```
+
+### Install and start as a system service
+
+::: {.panel-tabset}
+
+#### Linux
+
+```bash
+sudo cloudflared service install
+sudo systemctl enable --now cloudflared
+```
+
+#### macOS
+
+```bash
+sudo cloudflared service install
+sudo launchctl start com.cloudflare.cloudflared
+```
+
+#### Windows
+
+```powershell
+cloudflared service install
+Start-Service cloudflared
+```
+
+:::
+
+Access Open WebUI at `https://chat.yourdomain.com` from any browser, anywhere.
+
+## Which option to use
+
+| Situation | Use |
+|---|---|
+| Accessing from your own devices only | **Tailscale** |
+| Sharing with someone who cannot install apps | **Cloudflare Tunnel** |
+| Behind CGNAT (most Danish ISPs) | Both work — no router config needed |
+| Privacy-first, zero public exposure | **Tailscale** |
+
+---
+
+# Smoke Test
+
+Run this after seeding to exercise the full stack end to end:
+
+```python
+from dotenv import load_dotenv
+load_dotenv()
+
+from openspace import OpenSpace
+from tools import web_search
+
+agent = OpenSpace(tools=[web_search])
+
+# Should hit the ggplot2 skill (seeded)
+r1 = agent.run(
+    "Write a minimal ggplot2 dotplot of mpg vs cyl from mtcars. "
+    "Horizontal text, viridis colors."
+)
+print("=== ggplot2 task ===\n", r1)
+
+# Exercises web_search
+r2 = agent.run("What is the latest stable release of Ollama?")
+print("=== web search task ===\n", r2)
+
+# Second R task — skill retrieval expected (no cold-start reasoning)
+r3 = agent.run(
+    "Write a ggplot2 dumbbell chart comparing life expectancy 2000 vs 2020 "
+    "for 10 countries using a fake inline tibble."
+)
+print("=== ggplot2 task 2 (skill retrieval expected) ===\n", r3)
+```
+
+---
+
+# Quick Reference
+
+## Environment variables
+
+| Variable | Where set | Value |
+|---|---|---|
+| `OPENSPACE_MODEL` | `.env` | `gemini/gemini-2.5-flash` |
+| `GEMINI_API_KEY` | `.env` / system | From AI Studio |
+| `PERPLEXITY_API_KEY` | `.env` / system | From perplexity.ai |
+| `OPENROUTER_API_KEY` | system | From openrouter.ai |
+| `MCP_ENABLE` | shell / systemd unit | `true` |
+
+## Service endpoints
+
+| Service | Local URL | Remote (Tailscale) |
+|---|---|---|
+| Open WebUI | `http://localhost:8080` | `http://myhomepc:8080` |
+| Ollama API | `http://localhost:11434` | `http://myhomepc:11434` |
+| mcpo proxy | `http://localhost:8000` | internal only |
+| mcpo OpenAPI docs | `http://localhost:8000/docs` | — |
+
+## External links
+
+| Resource | URL |
+|---|---|
+| Google AI Studio | `https://aistudio.google.com` |
+| Perplexity API settings | `https://perplexity.ai/settings/api` |
+| OpenRouter keys | `https://openrouter.ai/keys` |
+| Tailscale admin | `https://login.tailscale.com/admin` |
+| OpenSpace repo | `https://github.com/HKUDS/OpenSpace` |
+
+## Day-to-day commands
+
+```bash
+# Check all service status (Linux)
+sudo systemctl status ollama openwebui mcpo
+
+# Restart after config changes (Linux)
+sudo systemctl restart openwebui mcpo
+
+# Live service logs (Linux)
+journalctl -fu openwebui
+journalctl -fu mcpo
+
+# Pull a new Ollama model
+ollama pull llama3.2:latest
+
+# Re-seed skills (merge — safe to re-run)
+cd ~/openspace-agent && pixi run python seed_skills.py
+
+# Inspect skill library
+python -c "
+import json, os
+lib = json.load(open(os.path.expanduser('~/.openspace_skills.json')))
+[print(f'[{k}] {v[\"task\"][:70]}') for k, v in lib.items()]
+"
+
+# Check Tailscale status
+tailscale status
+tailscale ip
+```
