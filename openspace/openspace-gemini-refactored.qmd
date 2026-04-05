@@ -1,0 +1,297 @@
+---
+title: "Evolving Memory Agent Setup"
+subtitle: "A Complete Guide to OpenSpace, nanobot, and Local AI"
+author: "Ilya Kashnitsky"
+date: last-modified
+date-format: "YYYY-MM-DD"
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 2
+    toc-title: "Contents"
+    toc-location: left
+    number-sections: true
+    smooth-scroll: true
+    code-fold: false
+    code-copy: true
+    code-overflow: scroll
+    highlight-style: github
+    embed-resources: true
+    include-in-header:
+      text: |
+        <style>
+        body { font-size: 0.95rem; }
+        h1.title { font-size: 1.8rem; }
+        .callout { margin-block: 1.2rem; }
+        code { font-size: 0.85em; }
+        pre.sourceCode { font-size: 0.85em; }
+        </style>
+execute:
+  echo: true
+  eval: false
+---
+
+# Introduction: What Are We Building?
+
+Welcome! This guide will help you build a powerful, self-evolving AI assistant. Because we are combining several tools, it helps to understand the "anatomy" of what we are building:
+
+* **The Interface (Open WebUI & Telegram)**: How you talk to your AI.
+* **The Brains (Ollama, Gemini, OpenRouter)**: The engines that process your text. Ollama runs locally; Gemini runs in the cloud.
+* **The Hands (MCP)**: Tools that let the AI search the web, read your files, or check its memory.
+* **The Agents (OpenSpace & nanobot)**: The "managers." OpenSpace learns how to do complex tasks (like writing R code) and remembers them. nanobot handles your Telegram messages and scheduled daily summaries.
+
+::: {.callout-note}
+**Don't let the code scare you.** You don't need to be a programmer to follow this. We will use a terminal (a text-based command window) to copy and paste instructions. Just follow the steps in order!
+:::
+
+---
+
+# Phase 1: The Foundations
+
+Before we install the AI, we need two foundational tools: a good terminal to type commands, and a package manager to keep our software organized without breaking your computer's built-in systems.
+
+## WezTerm (Your Command Center)
+
+WezTerm is a fast, reliable terminal window where we will run all our commands.
+
+::: {.panel-tabset}
+
+### Windows
+Open your default Command Prompt or PowerShell and paste:
+```powershell
+winget install wez.wezterm
+
+```
+### macOS
+Open the default "Terminal" app and paste:
+```bash
+brew install --cask wezterm
+
+```
+### Linux (Debian/Ubuntu/Zorin)
+```bash
+curl -fsSL [https://apt.fury.io/wez/gpg.key](https://apt.fury.io/wez/gpg.key) \
+  | sudo gpg --dearmor -o /usr/share/keyrings/wezterm-fury.gpg
+echo 'deb [signed-by=/usr/share/keyrings/wezterm-fury.gpg] [https://apt.fury.io/wez/](https://apt.fury.io/wez/) * *' \
+  | sudo tee /etc/apt/sources.list.d/wezterm.list
+sudo apt update && sudo apt install wezterm
+
+```
+:::
+**Once installed, open WezTerm. Use this new window for all remaining steps in this guide.**
+## pixi (Your Software Manager)
+pixi is a brilliant tool that lets us install Python and AI software cleanly into isolated folders, ensuring we don't mess up your computer's core systems.
+::: {.panel-tabset}
+### Windows
+```powershell
+winget install prefix-dev.pixi
+
+```
+### macOS
+```bash
+brew install pixi
+
+```
+### Linux
+```bash
+curl -fsSL [https://pixi.sh/install.sh](https://pixi.sh/install.sh) | sh
+source ~/.bashrc
+
+```
+:::
+Check it worked by typing pixi --version.
+# Phase 2: The Local Brain & Interface
+## Ollama (Offline AI)
+Ollama lets you run AI models directly on your computer, meaning they work without the internet and keep your data 100% private.
+::: {.panel-tabset}
+### Windows
+Download the installer from ollama.com/download. It will run quietly in the background.
+### macOS
+```bash
+brew install ollama
+brew services start ollama
+
+```
+### Linux
+```bash
+curl -fsSL [https://ollama.com/install.sh](https://ollama.com/install.sh) | sh
+
+```
+:::
+Let's download your first AI model. In WezTerm, run:
+```bash
+ollama pull gemma4:12b
+
+```
+*(Note: If you have an older computer with less memory, type ollama pull gemma4:4b instead).*
+## Open WebUI (Your Browser Interface)
+Open WebUI looks and feels exactly like ChatGPT, but it connects to your private Ollama setup.
+::: {.panel-tabset}
+### Mac & Linux
+```bash
+mkdir ~/openwebui && cd ~/openwebui
+pixi init
+pixi add python==3.14 pip
+pixi run pip install open-webui
+
+# To start it:
+MCP_ENABLE=true pixi run open-webui serve
+
+```
+### Windows
+```powershell
+mkdir ~/openwebui; cd ~/openwebui
+pixi init
+pixi add python==3.14 pip
+pixi run pip install open-webui
+
+# To start it:
+$env:MCP_ENABLE = "true"
+pixi run open-webui serve
+
+```
+:::
+Once running, open your web browser and go to http://localhost:8080.
+# Phase 3: Giving the AI Hands (MCP)
+Right now, your AI can only chat. **MCP** (Model Context Protocol) is a new standard that allows the AI to securely interact with the outside world—like reading your Documents folder or searching the web.
+Because Open WebUI requires these tools to be formatted in a specific way, we use a tiny bridge called mcpo.
+### 1. Install Node.js (Required for tools)
+First, ensure you have Node installed:
+ * **Windows:** winget install OpenJS.NodeJS.LTS
+ * **macOS:** brew install node
+ * **Linux:** sudo apt install nodejs npm
+### 2. Install the Bridge (mcpo)
+Open a *new* WezTerm window (leave Open WebUI running in the first one):
+```bash
+cd ~/openwebui
+pixi run pip install mcpo
+
+```
+### 3. Create the Configuration File
+Create a text file inside your openwebui folder named mcp-config.json and paste this exactly.
+**CRITICAL: Change /home/youruser/Documents to your actual Documents folder path!**
+*(e.g., C:\\Users\\YourName\\Documents on Windows, or /Users/YourName/Documents on Mac).*
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/home/youruser/Documents"
+      ]
+    },
+    "memory": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ]
+    }
+  }
+}
+
+```
+### 4. Start the Bridge
+```bash
+cd ~/openwebui
+pixi run mcpo --host 0.0.0.0 --port 8000 --config ./mcp-config.json --hot-reload
+
+```
+Finally, go to your Open WebUI browser tab -> **Admin Settings -> External Tools -> + Add Server**.
+Choose **Type: OpenAPI** and add these two URLs one by one:
+ * http://localhost:8000/filesystem
+ * http://localhost:8000/memory
+# Phase 4: Connecting Cloud Brains (API Keys)
+For highly complex reasoning, we want our agents to borrow supercomputers from Google and Perplexity. You will need to create accounts and get "API Keys" (long passwords) for these services.
+ 1. **OpenRouter** (Access to hundreds of models): Sign up at openrouter.ai -> Keys -> Create key.
+ 2. **Gemini** (Google's reasoning engine): Go to aistudio.google.com -> Get API key.
+ 3. **Perplexity** (Live web search): Go to perplexity.ai/settings/api -> Generate.
+Once you have these passwords, save them as environment variables in your terminal so our programs can find them:
+::: {.panel-tabset}
+### Linux / macOS
+```bash
+export OPENROUTER_API_KEY="sk-or-v1-..."
+export GEMINI_API_KEY="AIza-..."
+export PERPLEXITY_API_KEY="pplx-..."
+
+```
+### Windows
+```powershell
+[System.Environment]::SetEnvironmentVariable("OPENROUTER_API_KEY", "sk-or-v1-...", "User")
+[System.Environment]::SetEnvironmentVariable("GEMINI_API_KEY", "AIza-...", "User")
+[System.Environment]::SetEnvironmentVariable("PERPLEXITY_API_KEY", "pplx-...", "User")
+
+```
+:::
+*(You should also paste these keys directly into Open WebUI under Settings -> Connections!)*
+# Phase 5: The Agents (OpenSpace & nanobot)
+You now have a working AI ecosystem. Let's install the two "Managers" created by the HKUDS lab.
+## OpenSpace (The Skill Learner)
+OpenSpace tackles hard tasks (like writing code). If it figures out a good solution, it writes down a "Skill" in a hidden file so it doesn't have to think as hard next time.
+```bash
+mkdir ~/openspace-agent && cd ~/openspace-agent
+pixi init
+pixi add python==3.14 pip
+pixi run pip install python-dotenv "git+[https://github.com/HKUDS/OpenSpace.git](https://github.com/HKUDS/OpenSpace.git)"
+
+```
+Create a file named .env in this folder and paste your keys:
+```ini
+OPENSPACE_MODEL=gemini/gemini-3.1-flash
+GEMINI_API_KEY=AIza-...
+PERPLEXITY_API_KEY=pplx-...
+
+```
+**Seed it with knowledge:**
+The developers pre-packaged 21 skills (from R coding to analyzing Danish tax rules). Run this to download them:
+```bash
+pixi run python seed_skills.py
+
+```
+## nanobot (The Telegram Assistant)
+While OpenSpace does heavy lifting, nanobot lives on your phone via Telegram. It can chat, access your MCP tools, and send you scheduled morning briefings.
+ 1. Open Telegram, search for **@BotFather**, send /newbot, and copy your bot token.
+ 2. Send a message to **@userinfobot** to get your personal id (to prevent strangers from texting your bot).
+```bash
+cd ~/openwebui
+pixi run pip install nanobot-ai
+pixi run nanobot onboard
+
+```
+Create a file at ~/.nanobot/config.json and fill in your keys and Telegram info. *(See the official nanobot repository for the exact template format).*
+Start the bot:
+```bash
+pixi run nanobot gateway
+
+```
+Your Telegram bot is now alive and can answer you!
+# Phase 6: Remote Access (Access Your AI From Anywhere)
+If you want to use your Open WebUI from your phone while away from home, **do not open ports on your router**. Instead, use a secure mesh network.
+### Recommended: Tailscale
+Tailscale securely links your devices together like a private, invisible Wi-Fi network.
+ 1. Install Tailscale on your host computer from tailscale.com.
+ 2. Install the Tailscale app on your phone/laptop.
+ 3. Log into the same account on both.
+ 4. On your host computer, run tailscale ip to get your private IP address (e.g., 100.64.1.5).
+Now, on your phone, open your browser and go to http://100.64.1.5:8080. You are securely connected to your home AI!
+# Appendix: Keeping It Running 24/7 (Linux Only)
+*If you are on Windows or Mac, you simply run the start commands in WezTerm when you want to use the system. If you are using Linux on a home server and want these to run silently in the background even after a reboot, you use systemd.*
+To do this, locate the exact path to your pixi tools by running:
+```bash
+cd ~/openwebui
+pixi run which open-webui
+pixi run which mcpo
+
+```
+You can then create .service files in /etc/systemd/system/ using these exact paths to allow Linux to manage them automatically.
+
+***
+
+### ⚠️ Watch Out
+
+* **Python 3.14 Compatibility:** Python 3.14 is the latest stable version of Python. While running `pixi add python==3.14 pip`, remember that newer minor Python bumps often lag slightly in pre-compiled binary wheels for deeply nested machine learning packages. If `open-webui` or `nanobot-ai` fails to build because it can't find a compatible wheel for 3.14, simply dial the version back to `python==3.13` in your `pixi` command.
+* **Llama 4 Requirements:** The latest version is Llama 4. If you decide to test Meta's latest models by running `ollama pull llama4:latest`, verify your hardware can handle the newer context window and parameter scales, as performance can drop abruptly if the model spills over from VRAM to system RAM.
+

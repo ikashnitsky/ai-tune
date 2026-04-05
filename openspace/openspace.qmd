@@ -1,6 +1,6 @@
 ---
 title: "Evolving Memory Agent Setup"
-subtitle: "OpenSpace · Ollama · WezTerm · OpenRouter · Gemini · Perplexity · Open WebUI · MCP · Remote Access"
+subtitle: "OpenSpace · nanobot · Ollama · WezTerm · OpenRouter · Gemini · Perplexity · Open WebUI · MCP · Remote Access"
 author: "Ilya Kashnitsky"
 date: last-modified
 date-format: "YYYY-MM-DD"
@@ -34,7 +34,7 @@ execute:
 
 # Overview
 
-This guide installs and wires together a self-evolving memory agent stack with full MCP support and persistent remote access from any device. Follow each section in order.
+This guide installs and wires together a self-evolving memory agent stack with full MCP support, a Telegram bot interface, scheduled tasks, and persistent remote access from any device. Follow each section in order.
 
 **Stack summary:**
 
@@ -43,17 +43,22 @@ This guide installs and wires together a self-evolving memory agent stack with f
 | **WezTerm** | Terminal emulator used throughout |
 | **pixi** | Python environment manager |
 | **Ollama** | Local LLM inference (offline models) |
-| **Open WebUI** | Chat UI — Ollama + external APIs + MCP tools |
+| **Open WebUI** | Browser chat UI — Ollama + external APIs + MCP tools |
 | **mcpo** | MCP-to-OpenAPI proxy for stdio-based MCP servers |
 | **OpenRouter** | Unified API gateway for cloud models |
 | **Gemini API** | Primary reasoning engine for OpenSpace |
 | **Perplexity API** | Live-search tool inside the agent |
 | **OpenSpace** | Self-evolving skill memory agent |
+| **nanobot** | Lightweight agent runtime — Telegram bot + scheduled tasks |
 | **systemd** | Keeps all services running permanently (Linux) |
 | **Tailscale** | Secure remote access from phone or laptop |
 
 ::: {.callout-note}
-**MCP in Open WebUI:** Native HTTP/SSE support since **v0.6.31**. For the more common stdio-based MCP servers (filesystem, memory, brave-search, etc.) the `mcpo` proxy converts them to OpenAPI endpoints. Section 6 covers both paths.
+**Two complementary agent layers:** OpenSpace and nanobot come from the same HKUDS lab but serve different purposes. OpenSpace is your skill-learning task engine (Python scripts, workflows). nanobot is your always-on conversational interface — it answers Telegram messages, runs scheduled briefings, and shares your MCP tools. Their memory stores are independent and do not conflict.
+:::
+
+::: {.callout-note}
+**MCP in Open WebUI:** Native HTTP/SSE MCP support since **v0.6.31**. For stdio-based MCP servers (filesystem, memory, brave-search, etc.) the `mcpo` proxy converts them to OpenAPI endpoints. Section 6 covers both paths. nanobot reuses the same MCP server definitions without the proxy.
 :::
 
 ---
@@ -124,7 +129,6 @@ brew install pixi
 
 ```bash
 curl -fsSL https://pixi.sh/install.sh | sh
-# Restart your shell or run:
 source ~/.bashrc
 ```
 
@@ -140,7 +144,7 @@ pixi --version
 
 # Ollama
 
-Ollama runs open-weight LLMs locally. Both Open WebUI and OpenSpace connect to it.
+Ollama runs open-weight LLMs locally. Open WebUI, nanobot, and OpenSpace all connect to it.
 
 ## Install
 
@@ -154,7 +158,6 @@ Download from [ollama.com/download](https://ollama.com/download). The installer 
 
 ```bash
 brew install ollama
-# Start as a background service:
 brew services start ollama
 ```
 
@@ -162,7 +165,7 @@ brew services start ollama
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
-# The script registers a systemd service — Ollama starts on boot automatically.
+# Registers and starts a systemd service automatically — runs on boot.
 ```
 
 :::
@@ -194,7 +197,7 @@ ollama run gemma3:12b "What is a skill-based memory agent? Two sentences."
 
 # Open WebUI
 
-Open WebUI is a chat interface connecting Ollama locally, any OpenAI-compatible API externally, and MCP tool servers natively since v0.6.31.
+Chat interface connecting Ollama locally, any OpenAI-compatible API externally, and MCP tool servers natively since v0.6.31.
 
 ## Install
 
@@ -216,7 +219,7 @@ mkdir ~/openwebui && cd ~/openwebui
 pixi init
 pixi add python==3.11 pip
 pixi run pip install open-webui
-# Note the exact binary path for the systemd unit in Section 12:
+# Note the binary path — needed for the systemd unit in Section 13:
 pixi run which open-webui
 ```
 
@@ -226,14 +229,16 @@ pixi run which open-webui
 
 ::: {.panel-tabset}
 
-### Windows / macOS
+### macOS / Linux
 
 ```bash
 cd ~/openwebui
 MCP_ENABLE=true pixi run open-webui serve
 ```
 
-On Windows (PowerShell), set the variable separately:
+For permanent operation on Linux, use the systemd unit in Section 13 instead.
+
+### Windows
 
 ```powershell
 $env:MCP_ENABLE = "true"
@@ -241,21 +246,12 @@ cd ~/openwebui
 pixi run open-webui serve
 ```
 
-### Linux
-
-```bash
-cd ~/openwebui
-MCP_ENABLE=true pixi run open-webui serve
-```
-
-For permanent background operation, use the systemd unit in Section 12 instead of running this manually.
-
 :::
 
 Open `http://localhost:8080`. On first launch it auto-detects Ollama at `http://localhost:11434`.
 
 ::: {.callout-note}
-`MCP_ENABLE=true` is required to make the MCP connections panel visible. First start downloads a small embedding model — allow 1–2 minutes.
+`MCP_ENABLE=true` is required to show the MCP connections panel. First start downloads a small embedding model — allow 1–2 minutes.
 :::
 
 ## Connect external APIs
@@ -272,34 +268,33 @@ After completing the API key sections below, go to **Settings → Connections** 
 
 # MCP Tools
 
-MCP (Model Context Protocol) lets the chat agent call external tools — filesystem access, web search, memory stores, databases, and anything else an MCP server exposes.
+MCP lets the agent call external tools — filesystem access, web search, memory stores, databases, and more.
 
 | Transport | Examples | Setup needed |
 |---|---|---|
 | **HTTP / SSE** | Remote services, n8n, hosted MCP | Register URL directly in UI |
-| **stdio** (most common) | filesystem, memory, brave-search | `mcpo` proxy → then register in UI |
+| **stdio** (most common) | filesystem, memory, brave-search | `mcpo` proxy → register in Open WebUI |
 
-## Path A — Native HTTP MCP
+nanobot connects to stdio MCP servers directly without mcpo — see Section 11.
 
-For MCP servers that already speak HTTP (no proxy needed):
+## Path A — Native HTTP MCP (Open WebUI only)
 
-1. Go to **Admin Settings → External Tools → + Add Server**.
-2. Set **Type** to **MCP (Streamable HTTP)**.
-3. Paste the server URL and any auth token.
-4. **Save** — tools appear in the chat tool picker immediately.
+1. **Admin Settings → External Tools → + Add Server**
+2. Type: **MCP (Streamable HTTP)**
+3. Paste the server URL and auth token → **Save**
 
-## Path B — stdio MCP via mcpo
+## Path B — stdio MCP via mcpo (Open WebUI)
 
 ### Install mcpo
 
 ::: {.panel-tabset}
 
-### Windows / macOS / Linux
+#### Windows / macOS / Linux
 
 ```bash
 cd ~/openwebui
 pixi run pip install mcpo
-# Note the binary path for systemd (Linux):
+# Note binary path for systemd (Linux):
 pixi run which mcpo
 ```
 
@@ -307,7 +302,7 @@ pixi run which mcpo
 
 ### Create `mcp-config.json`
 
-Create `~/openwebui/mcp-config.json`:
+Create `~/openwebui/mcp-config.json`. This same file is also referenced by nanobot in Section 11.
 
 ```json
 {
@@ -341,38 +336,39 @@ Create `~/openwebui/mcp-config.json`:
 }
 ```
 
+Adjust the filesystem path for your OS:
+
 ::: {.panel-tabset}
 
-#### Windows path
+#### Linux
 
 ```json
-"args": ["-y", "@modelcontextprotocol/server-filesystem", "C:\\Users\\yourname\\Documents"]
+"/home/youruser/Documents"
 ```
 
-#### macOS path
+#### macOS
 
 ```json
-"args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/yourname/Documents"]
+"/Users/yourname/Documents"
 ```
 
-#### Linux path
+#### Windows
 
 ```json
-"args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/youruser/Documents"]
+"C:\\Users\\yourname\\Documents"
 ```
 
 :::
 
 ::: {.callout-note}
-`npx` runs servers on demand — no global npm installs required. Node.js must be present (`node --version`).
+Node.js is required for `npx`. Check with `node --version`.
 
-**Install Node.js if missing:**
+**Install if missing:**
 
 ```bash
-# Linux (via nvm — recommended over apt)
+# Linux (nvm — recommended)
 curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-source ~/.bashrc
-nvm install --lts
+source ~/.bashrc && nvm install --lts
 
 # macOS
 brew install node
@@ -387,25 +383,21 @@ winget install OpenJS.NodeJS.LTS
 ```bash
 cd ~/openwebui
 pixi run mcpo --host 0.0.0.0 --port 8000 \
-  --config ./mcp-config.json \
-  --hot-reload
+  --config ./mcp-config.json --hot-reload
 ```
 
-On Linux, use the systemd unit in Section 12 instead.
+On Linux, use the systemd unit in Section 13 instead.
 
 ### Verify
 
 ```bash
 curl http://localhost:8000/docs
+# Returns OpenAPI schema for all registered servers
 ```
-
-Returns the OpenAPI schema for all registered servers. If it loads, the proxy is healthy.
 
 ### Register in Open WebUI
 
 **Admin Settings → External Tools → + Add Server → Type: OpenAPI**
-
-One entry per server:
 
 ```
 http://localhost:8000/filesystem
@@ -417,13 +409,12 @@ http://localhost:8000/brave-search
 
 # OpenRouter
 
-Unified access to 200+ cloud models under a single endpoint and billing account.
+Unified access to 200+ cloud models under a single endpoint.
 
 ## Get your API key
 
-1. Sign up at [openrouter.ai](https://openrouter.ai).
-2. Go to **Keys → Create key**. Copy `sk-or-v1-...`.
-3. Add credits under **Credits** (pay-as-you-go).
+1. Sign up at [openrouter.ai](https://openrouter.ai) → **Keys → Create key**
+2. Add credits under **Credits** (pay-as-you-go)
 
 ## Set the environment variable
 
@@ -437,7 +428,7 @@ export OPENROUTER_API_KEY="sk-or-v1-your-key-here"
 source ~/.bashrc
 ```
 
-### Windows (PowerShell)
+### Windows
 
 ```powershell
 [System.Environment]::SetEnvironmentVariable(
@@ -463,13 +454,13 @@ curl https://openrouter.ai/api/v1/chat/completions \
 Primary reasoning engine for OpenSpace. Billed separately from your Gemini Advanced subscription.
 
 ::: {.callout-important}
-**Gemini Advanced** covers the chat product only. Get an API key from AI Studio — generous free tier, paid via standard Google Cloud billing.
+**Gemini Advanced** covers the chat product only. Get an API key from AI Studio — generous free tier, paid via Google Cloud billing.
 :::
 
 ## Get your API key
 
-1. Go to [aistudio.google.com](https://aistudio.google.com).
-2. Click **Get API key → Create API key**. Copy `AIza...`.
+1. Go to [aistudio.google.com](https://aistudio.google.com)
+2. **Get API key → Create API key** → copy `AIza...`
 
 ## Set the environment variable
 
@@ -481,7 +472,7 @@ Primary reasoning engine for OpenSpace. Billed separately from your Gemini Advan
 export GEMINI_API_KEY="AIza-your-key-here"
 ```
 
-### Windows (PowerShell)
+### Windows
 
 ```powershell
 [System.Environment]::SetEnvironmentVariable(
@@ -503,16 +494,16 @@ curl "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:g
 
 # Perplexity API
 
-Adds live web-search to the agent via `sonar-pro`. Pro subscription includes $5/month in API credits, billed separately.
+Adds live web-search to the agent via `sonar-pro`. Pro subscription includes $5/month in API credits — billed separately from the chat product.
 
 ::: {.callout-important}
-**Perplexity Pro** chat credits and API credits are independent. Enable API billing at [perplexity.ai/settings/api](https://perplexity.ai/settings/api).
+Enable API billing at [perplexity.ai/settings/api](https://perplexity.ai/settings/api) — the chat subscription and API are independent.
 :::
 
 ## Get your API key
 
-1. Go to [perplexity.ai/settings/api](https://perplexity.ai/settings/api).
-2. Click **Generate**. Copy `pplx-...`.
+1. Go to [perplexity.ai/settings/api](https://perplexity.ai/settings/api)
+2. **Generate** → copy `pplx-...`
 
 ## Set the environment variable
 
@@ -524,7 +515,7 @@ Adds live web-search to the agent via `sonar-pro`. Pro subscription includes $5/
 export PERPLEXITY_API_KEY="pplx-your-key-here"
 ```
 
-### Windows (PowerShell)
+### Windows
 
 ```powershell
 [System.Environment]::SetEnvironmentVariable(
@@ -547,7 +538,7 @@ curl https://api.perplexity.ai/chat/completions \
 
 # OpenSpace
 
-Self-evolving skill engine. Extracts a reusable skill after each task and reuses it on subsequent similar tasks — cutting token cost over time.
+Self-evolving skill engine. Extracts a reusable skill after each task and reuses it on subsequent similar tasks — cutting token cost and latency over time.
 
 **Repo:** [github.com/HKUDS/OpenSpace](https://github.com/HKUDS/OpenSpace)
 
@@ -566,14 +557,10 @@ Gemini 2.5 Flash          ← OPENSPACE_MODEL in .env
     ├── needs web data? ──► web_search() ──► Perplexity sonar-pro
     │
     ▼
-Task result + new skill extracted and saved
+Result + new skill extracted and saved
 ```
 
 ## Create the project
-
-::: {.panel-tabset}
-
-### Windows / macOS / Linux
 
 ```bash
 mkdir ~/openspace-agent && cd ~/openspace-agent
@@ -583,18 +570,11 @@ pixi run pip install python-dotenv
 pixi run pip install "git+https://github.com/HKUDS/OpenSpace.git"
 ```
 
-:::
-
 ## Create `.env`
 
 ```ini
-# Primary reasoning model (LiteLLM model string)
 OPENSPACE_MODEL=gemini/gemini-2.5-flash
-
-# Gemini API key — from aistudio.google.com
 GEMINI_API_KEY=AIza-your-key-here
-
-# Perplexity key — for the web_search tool
 PERPLEXITY_API_KEY=pplx-your-key-here
 ```
 
@@ -645,7 +625,7 @@ pixi run python verify.py
 
 # Jumpstart Skills
 
-Seeds the skill library with 21 pre-distilled skills from your system prompt collection. Covers R coding, ggplot2, SKAT, bibliometrics, fact-checking, and 16 other domains.
+Seeds the skill library with 21 pre-distilled skills covering R coding, ggplot2, SKAT, bibliometrics, fact-checking, and 16 other domains.
 
 ## Place the seed files
 
@@ -655,8 +635,8 @@ Seeds the skill library with 21 pre-distilled skills from your system prompt col
 ├── .gitignore
 ├── tools.py
 ├── verify.py
-├── seed_skills.py          ← copy here
-└── openspace_skills.json   ← copy here
+├── seed_skills.py
+└── openspace_skills.json
 ```
 
 ## Run the seeder
@@ -668,7 +648,7 @@ pixi run python seed_skills.py
 ```
 
 ::: {.callout-tip}
-To reset and overwrite any previously learned skills:
+To reset to the seed set only:
 
 ```bash
 pixi run python seed_skills.py --replace
@@ -689,27 +669,174 @@ pixi run python seed_skills.py --replace
 
 ---
 
-# Persistent Services (Linux)
+# nanobot
 
-Keep the full stack running in the background and surviving reboots. Ollama is already registered as a systemd service by its installer. Create units for Open WebUI and mcpo.
+nanobot is a lightweight agent runtime (~4,000 lines) from the same HKUDS lab as OpenSpace. It handles the always-on conversational layer that OpenSpace does not cover: Telegram messages from your phone, scheduled briefings, and background subagent tasks. It reuses all your existing API keys and MCP server definitions.
+
+**Repo:** [github.com/HKUDS/nanobot](https://github.com/HKUDS/nanobot)
+
+## What it adds vs what you already have
+
+| Capability | OpenSpace | Open WebUI | nanobot |
+|---|---|---|---|
+| Browser chat UI | — | ✅ | — |
+| **Telegram / phone chat** | — | — | ✅ |
+| Skill-learning memory | ✅ | — | own simpler system |
+| MCP tools | via tools.py | via mcpo | native stdio |
+| **Scheduled tasks / cron** | — | — | ✅ |
+| **Subagents / background jobs** | — | — | ✅ |
+| Ollama / local models | ✅ | ✅ | ✅ |
 
 ::: {.callout-note}
-This section is Linux-only (systemd). On **macOS**, use `brew services` for Ollama and `launchd` plists for Open WebUI and mcpo. On **Windows**, use Task Scheduler (run on login, hidden) or NSSM.
+**Dual memory stores:** nanobot keeps its own conversational memory in `~/.nanobot/`. OpenSpace keeps skill memory in `~/.openspace_skills.json`. They are independent and do not conflict — treat them as different layers: nanobot = chat context, OpenSpace = reusable task patterns.
 :::
 
-## Find your pixi binary paths
+## Create a Telegram bot
 
-Before writing the unit files, get the exact paths pixi uses:
+1. Open Telegram and search for **@BotFather**
+2. Send `/newbot` and follow the prompts
+3. Copy the **bot token** (`123456:ABC-...`)
+4. Find your Telegram user ID: send any message to **@userinfobot** → copy your `id`
+
+## Install
+
+::: {.panel-tabset}
+
+### Windows / macOS / Linux
+
+```bash
+cd ~/openwebui
+pixi run pip install nanobot-ai
+pixi run nanobot onboard
+# Note the binary path for systemd (Linux):
+pixi run which nanobot
+```
+
+:::
+
+## Create `~/.nanobot/config.json`
+
+nanobot shares your existing API keys and reuses the `mcpServers` block directly from your `mcp-config.json` — copy it in:
+
+```json
+{
+  "providers": {
+    "openrouter": {
+      "apiKey": "sk-or-v1-your-key-here"
+    },
+    "gemini": {
+      "apiKey": "AIza-your-key-here"
+    },
+    "ollama": {
+      "apiKey": "no-key",
+      "apiBase": "http://localhost:11434/v1"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "openrouter/google/gemini-2.5-flash"
+    }
+  },
+  "tools": {
+    "mcpServers": {
+      "filesystem": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem",
+          "/home/youruser/Documents"
+        ]
+      },
+      "memory": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-memory"]
+      },
+      "brave-search": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+        "env": {
+          "BRAVE_API_KEY": "your-brave-api-key-here"
+        }
+      }
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "token": "YOUR_TELEGRAM_BOT_TOKEN",
+      "allowFrom": ["YOUR_TELEGRAM_USER_ID"]
+    }
+  }
+}
+```
+
+::: {.callout-warning}
+`allowFrom` restricts the bot to your Telegram user ID only. Do not leave it empty — any Telegram user could otherwise send commands to your agent and reach your filesystem.
+:::
+
+## Start the gateway (manual)
+
+```bash
+pixi run nanobot gateway
+```
+
+Send a message to your bot in Telegram — it should respond immediately.
+
+For permanent operation on Linux, use the systemd unit in Section 13 instead.
+
+## Test via CLI
+
+```bash
+pixi run nanobot agent -m "What files are in my Documents folder?"
+pixi run nanobot agent -m "Search the web for the latest Ollama release"
+```
+
+## Add scheduled tasks
+
+Scheduled tasks run on cron syntax and deliver results to your Telegram chat automatically:
+
+```bash
+# Daily 8am briefing
+pixi run nanobot cron add \
+  --name "morning" \
+  --message "Give me a 5-bullet morning briefing: weather in Copenhagen, top tech news, one interesting paper in demography" \
+  --cron "0 8 * * *"
+
+# Monday weekly press summary
+pixi run nanobot cron add \
+  --name "weekly-press" \
+  --message "Summarise the top 5 Danish news stories from the past week" \
+  --cron "0 9 * * 1"
+
+# List all scheduled tasks
+pixi run nanobot cron list
+
+# Remove a task
+pixi run nanobot cron remove --name "morning"
+```
+
+---
+
+# Persistent Services (Linux)
+
+Keeps the full stack running in the background and surviving reboots. Ollama is already registered as a systemd service by its installer. Create units for Open WebUI, mcpo, and nanobot.
+
+::: {.callout-note}
+This section is Linux-only (systemd). On **macOS**, use `brew services` for Ollama and `launchd` plists for the rest. On **Windows**, use Task Scheduler (run on login, hidden window).
+:::
+
+## Find pixi binary paths
 
 ```bash
 cd ~/openwebui
 pixi run which open-webui   # e.g. /home/youruser/.pixi/envs/default/bin/open-webui
 pixi run which mcpo         # e.g. /home/youruser/.pixi/envs/default/bin/mcpo
+pixi run which nanobot      # e.g. /home/youruser/.pixi/envs/default/bin/nanobot
 ```
 
-## Open WebUI service
+Replace the `ExecStart` paths in all units below with your actual output.
 
-Create `/etc/systemd/system/openwebui.service` (replace `youruser` throughout):
+## Open WebUI — `/etc/systemd/system/openwebui.service`
 
 ```ini
 [Unit]
@@ -721,10 +848,8 @@ Wants=ollama.service
 Type=simple
 User=youruser
 WorkingDirectory=/home/youruser/openwebui
+EnvironmentFile=/home/youruser/openwebui/.env.service
 Environment="MCP_ENABLE=true"
-Environment="GEMINI_API_KEY=AIza-your-key-here"
-Environment="OPENROUTER_API_KEY=sk-or-v1-your-key-here"
-Environment="PERPLEXITY_API_KEY=pplx-your-key-here"
 ExecStart=/home/youruser/.pixi/envs/default/bin/open-webui serve
 Restart=on-failure
 RestartSec=5
@@ -733,19 +858,7 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-::: {.callout-tip}
-Prefer loading secrets from a file instead of inline `Environment=` lines — more secure and easier to update:
-
-```ini
-EnvironmentFile=/home/youruser/openwebui/.env.service
-```
-
-Put `KEY=value` pairs (no `export`) in `/home/youruser/openwebui/.env.service` and `chmod 600` the file.
-:::
-
-## mcpo service
-
-Create `/etc/systemd/system/mcpo.service`:
+## mcpo — `/etc/systemd/system/mcpo.service`
 
 ```ini
 [Unit]
@@ -768,43 +881,78 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
+## nanobot — `/etc/systemd/system/nanobot.service`
+
+```ini
+[Unit]
+Description=nanobot agent gateway
+After=network.target ollama.service
+
+[Service]
+Type=simple
+User=youruser
+WorkingDirectory=/home/youruser/openwebui
+ExecStart=/home/youruser/.pixi/envs/default/bin/nanobot gateway
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Create the shared environment file
+
+Create `/home/youruser/openwebui/.env.service` (plain `KEY=value`, no `export`):
+
+```ini
+GEMINI_API_KEY=AIza-your-key-here
+OPENROUTER_API_KEY=sk-or-v1-your-key-here
+PERPLEXITY_API_KEY=pplx-your-key-here
+```
+
+```bash
+chmod 600 ~/openwebui/.env.service
+```
+
 ## Enable and start everything
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now ollama openwebui mcpo
+sudo systemctl enable --now ollama openwebui mcpo nanobot
 
 # Check status
-sudo systemctl status ollama openwebui mcpo
+sudo systemctl status ollama openwebui mcpo nanobot
 
-# Live logs (Ctrl+C to exit)
+# Live logs
 journalctl -fu openwebui
 journalctl -fu mcpo
+journalctl -fu nanobot
 ```
 
-## Useful service commands
+## Service management
 
 ```bash
 # Restart after config changes
 sudo systemctl restart openwebui
 sudo systemctl restart mcpo
+sudo systemctl restart nanobot
 
-# Stop temporarily (does not disable autostart)
-sudo systemctl stop openwebui
+# Stop temporarily (autostart remains active)
+sudo systemctl stop nanobot
 
 # Disable autostart permanently
-sudo systemctl disable openwebui
+sudo systemctl disable nanobot
 ```
 
 ---
 
 # Remote Access
 
-Access Open WebUI from your phone, laptop, or any other device — from anywhere.
+Access Open WebUI from your phone, laptop, or any device from anywhere.
 
 ## Option A — Tailscale (Recommended)
 
-Tailscale creates a private WireGuard mesh between your devices. Nothing is exposed to the internet. Works through CGNAT (common in Denmark). Free tier supports up to 100 devices.
+Creates a private WireGuard mesh between your devices. Nothing is exposed to the internet. Works through CGNAT (common in Denmark). Free tier: up to 100 devices.
 
 ### Install on the home machine
 
@@ -815,8 +963,7 @@ Tailscale creates a private WireGuard mesh between your devices. Nothing is expo
 ```bash
 curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up
-# Authenticate in the browser that opens
-tailscale ip        # note this IP — e.g. 100.64.1.5
+tailscale ip        # note this, e.g. 100.64.1.5
 ```
 
 #### macOS
@@ -838,7 +985,7 @@ winget install tailscale.tailscale
 
 ### Install on every client device
 
-- **Android (Pixel):** Tailscale on Google Play
+- **Android:** Tailscale on Google Play
 - **iOS:** Tailscale on App Store
 - **Laptop:** same installer as above
 
@@ -850,34 +997,28 @@ Sign in to the **same Tailscale account** on all devices.
 http://<tailscale-ip>:8080
 ```
 
-For a stable hostname instead of an IP, open the [Tailscale admin console](https://login.tailscale.com/admin/machines), click the machine, and set a **machine name** — then use:
+Enable **MagicDNS** in the [Tailscale admin console](https://login.tailscale.com/admin) → DNS → Enable MagicDNS. Then use:
 
 ```
 http://myhomepc:8080
 ```
 
-::: {.callout-tip}
-Enable **Tailscale MagicDNS** in the admin console → DNS → Enable MagicDNS. This makes `http://myhomepc:8080` work on all your devices without touching any `/etc/hosts` file.
-:::
+### Optional — subnet routing
 
-### (Optional) Enable subnet routing
-
-To access other services on your home network (NAS, router, Raspberry Pi) through Tailscale without installing it on every device:
+Access other home network devices (NAS, router, Raspberry Pi) without installing Tailscale on each:
 
 ```bash
-# On the home machine — advertise the local subnet
 sudo tailscale up --advertise-routes=192.168.1.0/24
-
-# Approve the subnet in the Tailscale admin console:
+# Approve the subnet in the admin console:
 # Machines → your machine → Edit route settings → Approve
 ```
 
 ## Option B — Cloudflare Tunnel
 
-If you want access from any browser without installing Tailscale on each device. Requires a domain managed by Cloudflare (free plan is fine).
+For access from any browser without installing Tailscale on client devices. Requires a domain on Cloudflare (free plan works).
 
 ::: {.callout-warning}
-Cloudflare Tunnel makes Open WebUI **reachable on the public internet**. Before setting this up: go to Open WebUI **Admin Settings → Users**, disable public registration and keep only your own account. Add Cloudflare Access in front of the tunnel (free) for an additional login gate.
+Cloudflare Tunnel makes Open WebUI **publicly reachable**. Before enabling: go to **Admin Settings → Users**, disable public registration, keep only your account. Add Cloudflare Access in front of the tunnel (free) as an additional auth gate.
 :::
 
 ### Install cloudflared
@@ -929,7 +1070,7 @@ ingress:
   - service: http_status:404
 ```
 
-### Install and start as a system service
+### Install as a system service
 
 ::: {.panel-tabset}
 
@@ -956,8 +1097,6 @@ Start-Service cloudflared
 
 :::
 
-Access Open WebUI at `https://chat.yourdomain.com` from any browser, anywhere.
-
 ## Which option to use
 
 | Situation | Use |
@@ -971,7 +1110,7 @@ Access Open WebUI at `https://chat.yourdomain.com` from any browser, anywhere.
 
 # Smoke Test
 
-Run this after seeding to exercise the full stack end to end:
+Run this after seeding to exercise the full OpenSpace stack end to end:
 
 ```python
 from dotenv import load_dotenv
@@ -993,12 +1132,20 @@ print("=== ggplot2 task ===\n", r1)
 r2 = agent.run("What is the latest stable release of Ollama?")
 print("=== web search task ===\n", r2)
 
-# Second R task — skill retrieval expected (no cold-start reasoning)
+# Second R task — skill retrieval expected, no cold-start
 r3 = agent.run(
     "Write a ggplot2 dumbbell chart comparing life expectancy 2000 vs 2020 "
     "for 10 countries using a fake inline tibble."
 )
 print("=== ggplot2 task 2 (skill retrieval expected) ===\n", r3)
+```
+
+Test nanobot from the CLI:
+
+```bash
+cd ~/openwebui
+pixi run nanobot agent -m "List my scheduled cron tasks"
+pixi run nanobot agent -m "What files are in my Documents folder?"
 ```
 
 ---
@@ -1010,10 +1157,10 @@ print("=== ggplot2 task 2 (skill retrieval expected) ===\n", r3)
 | Variable | Where set | Value |
 |---|---|---|
 | `OPENSPACE_MODEL` | `.env` | `gemini/gemini-2.5-flash` |
-| `GEMINI_API_KEY` | `.env` / system | From AI Studio |
-| `PERPLEXITY_API_KEY` | `.env` / system | From perplexity.ai |
-| `OPENROUTER_API_KEY` | system | From openrouter.ai |
-| `MCP_ENABLE` | shell / systemd unit | `true` |
+| `GEMINI_API_KEY` | `.env.service` / system | From AI Studio |
+| `PERPLEXITY_API_KEY` | `.env.service` / system | From perplexity.ai |
+| `OPENROUTER_API_KEY` | `.env.service` / system | From openrouter.ai |
+| `MCP_ENABLE` | `.env.service` / shell | `true` |
 
 ## Service endpoints
 
@@ -1023,6 +1170,7 @@ print("=== ggplot2 task 2 (skill retrieval expected) ===\n", r3)
 | Ollama API | `http://localhost:11434` | `http://myhomepc:11434` |
 | mcpo proxy | `http://localhost:8000` | internal only |
 | mcpo OpenAPI docs | `http://localhost:8000/docs` | — |
+| nanobot | Telegram bot | Telegram (no URL needed) |
 
 ## External links
 
@@ -1033,27 +1181,36 @@ print("=== ggplot2 task 2 (skill retrieval expected) ===\n", r3)
 | OpenRouter keys | `https://openrouter.ai/keys` |
 | Tailscale admin | `https://login.tailscale.com/admin` |
 | OpenSpace repo | `https://github.com/HKUDS/OpenSpace` |
+| nanobot repo | `https://github.com/HKUDS/nanobot` |
 
 ## Day-to-day commands
 
 ```bash
 # Check all service status (Linux)
-sudo systemctl status ollama openwebui mcpo
+sudo systemctl status ollama openwebui mcpo nanobot
 
-# Restart after config changes (Linux)
-sudo systemctl restart openwebui mcpo
+# Restart after config changes
+sudo systemctl restart openwebui mcpo nanobot
 
-# Live service logs (Linux)
+# Live logs
 journalctl -fu openwebui
-journalctl -fu mcpo
+journalctl -fu nanobot
 
 # Pull a new Ollama model
 ollama pull llama3.2:latest
 
-# Re-seed skills (merge — safe to re-run)
+# Run an OpenSpace task
+cd ~/openspace-agent && pixi run python your_script.py
+
+# Re-seed OpenSpace skills (safe to re-run)
 cd ~/openspace-agent && pixi run python seed_skills.py
 
-# Inspect skill library
+# Manage nanobot scheduled tasks
+pixi run nanobot cron list
+pixi run nanobot cron add --name "briefing" --message "Morning summary" --cron "0 8 * * *"
+pixi run nanobot cron remove --name "briefing"
+
+# Inspect OpenSpace skill library
 python -c "
 import json, os
 lib = json.load(open(os.path.expanduser('~/.openspace_skills.json')))
